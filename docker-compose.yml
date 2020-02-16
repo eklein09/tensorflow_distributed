@@ -1,0 +1,18 @@
+version: '3.7'
+services:
+  worker-1:
+    image: localhost:5000/tensorflow_distributed
+    networks:
+      tensorflow_network:
+        ipv4_address: 10.1.10.58
+    env_file:
+      - worker1.env
+  worker-2:
+    image: localhost:5000/tensorflow_distributed
+    networks:
+      tensorflow_network:
+        ipv4_address: 10.1.10.250
+    env_file:
+      - worker2.env
+networks:
+  tensorflow_network:
