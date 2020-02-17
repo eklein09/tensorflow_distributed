@@ -7,6 +7,10 @@ services:
         ipv4_address: 10.1.10.58
     env_file:
       - worker1.env
+    deploy:
+      placement:
+        constraints:
+          - node.hostname == docker-desktop
   worker-2:
     image: localhost:5000/tensorflow_distributed
     networks:
@@ -14,5 +18,9 @@ services:
         ipv4_address: 10.1.10.250
     env_file:
       - worker2.env
+    deploy:
+      placement:
+        constraints:
+          - node.hostname == eric-aspire
 networks:
   tensorflow_network:
