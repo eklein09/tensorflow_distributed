@@ -1,77 +1,56 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
+
+import tensorflow_datasets as tfds
 import tensorflow as tf
-import os
-import json
+tfds.disable_progress_bar()
 
-from tensorflow import keras
-import resnet
+BUFFER_SIZE = 10000
+BATCH_SIZE = 64
 
-"""
-Remember to set the TF_CONFIG envrionment variable.
-For example:
-export TF_CONFIG='{"cluster": {"worker": ["10.1.10.58:12345", "10.1.10.250:12345"]}, "task": {"index": 0, "type": "worker"}}'
-"""
+def make_datasets_unbatched():
+    # Scaling MNIST data from (0, 255] to (0., 1.]
+    def scale(image, label):
+        image = tf.cast(image, tf.float32)
+        image /= 255
+        return image, label
+
+    datasets, info = tfds.load(name='mnist',
+                               with_info=True,
+                               as_supervised=True)
+
+    return datasets['train'].map(scale).cache().shuffle(BUFFER_SIZE)
+
+train_datasets = make_datasets_unbatched().batch(BATCH_SIZE)
+
+def build_and_compile_cnn_model():
+    model = tf.keras.Sequential([
+        tf.keras.layers.Conv2D(32, 3, activation='relu', input_shape=(28, 28, 1)),
+        tf.keras.layers.MaxPooling2D(),
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dense(10)
+    ])
+    model.compile(
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        optimizer=tf.keras.optimizers.SGD(learning_rate=0.001),
+        metrics=['accuracy'])
+    return model
 
 strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
 
-NUM_GPUS = 2
-BS_PER_GPU = 128
-NUM_EPOCHS = 60
+NUM_WORKERS = 2
 
-HEIGHT = 32
-WIDTH = 32
-NUM_CHANNELS = 3
-NUM_CLASSES = 10
-NUM_TRAIN_SAMPLES = 50000
-
-BASE_LEARNING_RATE = 0.1
-LR_SCHEDULE = [(0.1, 30), (0.01, 45)]
-
-
-def normalize(x, y):
-    x = tf.image.per_image_standardization(x)
-    return x, y
-
-
-def augmentation(x, y):
-    x = tf.image.resize_with_crop_or_pad(
-        x, HEIGHT + 8, WIDTH + 8)
-    x = tf.image.random_crop(x, [HEIGHT, WIDTH, NUM_CHANNELS])
-    x = tf.image.random_flip_left_right(x)
-    return x, y
-
-
-def schedule(epoch):
-    initial_learning_rate = BASE_LEARNING_RATE * BS_PER_GPU / 128
-    learning_rate = initial_learning_rate
-    for mult, start_epoch in LR_SCHEDULE:
-        if epoch >= start_epoch:
-            learning_rate = initial_learning_rate * mult
-        else:
-            break
-    tf.summary.scalar('learning rate', data=learning_rate, step=epoch)
-    return learning_rate
-
-
-(x, y), (x_test, y_test) = keras.datasets.cifar10.load_data()
-
-train_dataset = tf.data.Dataset.from_tensor_slices((x, y))
-test_dataset = tf.data.Dataset.from_tensor_slices((x_test, y_test))
-
-tf.random.set_seed(22)
-train_dataset = train_dataset.map(augmentation).map(normalize).shuffle(NUM_TRAIN_SAMPLES).batch(BS_PER_GPU * NUM_GPUS,
-                                                                                                drop_remainder=True)
-test_dataset = test_dataset.map(normalize).batch(BS_PER_GPU * NUM_GPUS, drop_remainder=True)
-
-input_shape = (HEIGHT, WIDTH, NUM_CHANNELS)
-img_input = tf.keras.layers.Input(shape=input_shape)
-opt = keras.optimizers.SGD(learning_rate=0.1, momentum=0.9)
-
+# Here the batch size scales up by number of workers since
+# `tf.data.Dataset.batch` expects the global batch size. Previously we used 64,
+# and now this becomes 128.
+GLOBAL_BATCH_SIZE = 64 * NUM_WORKERS
 with strategy.scope():
-    model = resnet.resnet56(img_input=img_input, classes=NUM_CLASSES)
-    model.compile(
-        optimizer=opt,
-        loss='sparse_categorical_crossentropy',
-        metrics=['sparse_categorical_accuracy'])
-model.fit(train_dataset,
-          epochs=NUM_EPOCHS)
+    # Creation of dataset, and model building/compiling need to be within
+    # `strategy.scope()`.
+    train_datasets = make_datasets_unbatched().batch(GLOBAL_BATCH_SIZE)
+    multi_worker_model = build_and_compile_cnn_model()
+
+# Keras' `model.fit()` trains the model with specified number of epochs and
+# number of steps per epoch. Note that the numbers here are for demonstration
+# purposes only and may not sufficiently produce a model with good quality.
+multi_worker_model.fit(x=train_datasets, epochs=3, steps_per_epoch=5)
